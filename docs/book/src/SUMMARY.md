@@ -60,6 +60,8 @@
   - [alpha generate](./reference/commands/alpha_generate.md)
   - [alpha update](./reference/commands/alpha_update.md)
 
+- [MCP Server](./reference/mcp.md)
+
 ---
 
 - [Reference](./reference/reference.md)

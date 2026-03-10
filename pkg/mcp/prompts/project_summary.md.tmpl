@@ -1,0 +1,34 @@
+# Kubebuilder Project Summary
+
+**Kubebuilder version:** {{.Version}}
+{{- if .ProjectName}}
+**Project name:** {{.ProjectName}}
+{{- end}}
+{{- if .Domain}}
+**Domain:** {{.Domain}}
+{{- end}}
+{{- if .Repository}}
+**Repository:** {{.Repository}}
+{{- end}}
+**Project config version:** {{.ProjectVersion}}
+{{- if .MultiGroup}}
+**Layout:** multi-group
+{{- end}}
+
+## Plugin chain
+{{range .PluginChain}}- {{.}}
+{{else}}- (none configured)
+{{end}}
+## APIs ({{len .APIs}} total)
+{{if .APIs -}}
+| Group | Version | Kind | Controller | Namespaced | Webhooks |
+|-------|---------|------|-----------|-----------|---------|
+{{range .APIs -}}
+| {{.Group}} | {{.Version}} | {{.Kind}} | {{boolIcon .Controller}} | {{boolIcon .Namespaced}} | {{webhookSummary .Webhooks}} |
+{{end -}}
+{{else}}No APIs defined yet.
+{{end}}
+## Getting started
+
+Run `kubebuilder create api --help` to scaffold a new API, or
+`kubebuilder create webhook --help` to add webhooks to an existing API.
