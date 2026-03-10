@@ -17,16 +17,15 @@ limitations under the License.
 package mcp_test
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+
+	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"sigs.k8s.io/kubebuilder/v4/pkg/mcp"
 )
@@ -36,37 +35,21 @@ func TestMCP(t *testing.T) {
 	RunSpecs(t, "mcp suite")
 }
 
-// callServer sends a newline-delimited sequence of JSON-RPC requests to the
-// server and returns all response lines as a slice of decoded maps.
-func callServer(projectDir string, requestLines ...string) ([]map[string]any, error) {
-	in := strings.NewReader(strings.Join(requestLines, "\n") + "\n")
-	var out bytes.Buffer
+// connectTestClient builds the Kubebuilder MCP server and returns a connected
+// SDK client session backed by an in-memory transport. The caller must call
+// session.Close() when done.
+func connectTestClient(srv *mcp.Server) (*sdkmcp.ClientSession, error) {
+	sdkSrv := srv.Build()
 
-	s := mcp.NewServer(
-		mcp.WithVersion("v4.0.0-test"),
-		mcp.WithProjectDir(projectDir),
-		mcp.WithIO(in, &out),
-	)
+	t1, t2 := sdkmcp.NewInMemoryTransports()
+	ctx := context.Background()
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	if err := s.Run(ctx); err != nil {
+	if _, err := sdkSrv.Connect(ctx, t1, nil); err != nil {
 		return nil, err
 	}
 
-	var results []map[string]any
-	for _, line := range strings.Split(strings.TrimSpace(out.String()), "\n") {
-		if line == "" {
-			continue
-		}
-		var m map[string]any
-		if err := json.Unmarshal([]byte(line), &m); err != nil {
-			return nil, err
-		}
-		results = append(results, m)
-	}
-	return results, nil
+	client := sdkmcp.NewClient(&sdkmcp.Implementation{Name: "test-client", Version: "v0.0.1"}, nil)
+	return client.Connect(ctx, t2, nil)
 }
 
 const minimalProjectFile = `version: "3"
@@ -86,7 +69,10 @@ resources:
 `
 
 var _ = Describe("Server", func() {
-	var tmpDir string
+	var (
+		tmpDir  string
+		session *sdkmcp.ClientSession
+	)
 
 	BeforeEach(func() {
 		var err error
@@ -95,51 +81,35 @@ var _ = Describe("Server", func() {
 	})
 
 	AfterEach(func() {
+		if session != nil {
+			Expect(session.Close()).To(Succeed())
+			session = nil
+		}
 		Expect(os.RemoveAll(tmpDir)).To(Succeed())
 	})
 
-	Context("initialize", func() {
-		It("returns protocol version and capabilities", func() {
-			resps, err := callServer(tmpDir,
-				`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`,
-			)
-			Expect(err).NotTo(HaveOccurred())
-			Expect(resps).To(HaveLen(1))
-
-			resp := resps[0]
-			result := resp["result"].(map[string]any)
-			Expect(result["protocolVersion"]).To(Equal("2024-11-05"))
-			info := result["serverInfo"].(map[string]any)
-			Expect(info["name"]).To(Equal("kubebuilder"))
-			Expect(info["version"]).To(Equal("v4.0.0-test"))
-		})
-	})
-
-	Context("ping", func() {
-		It("returns empty result", func() {
-			resps, err := callServer(tmpDir,
-				`{"jsonrpc":"2.0","id":2,"method":"ping"}`,
-			)
-			Expect(err).NotTo(HaveOccurred())
-			Expect(resps).To(HaveLen(1))
-			result := resps[0]["result"].(map[string]any)
-			Expect(result).To(BeEmpty())
-		})
-	})
+	// makeSession builds a server for the given project directory and connects a test client.
+	makeSession := func(projectDir string) *sdkmcp.ClientSession {
+		srv := mcp.NewServer(
+			mcp.WithVersion("v4.0.0-test"),
+			mcp.WithProjectDir(projectDir),
+		)
+		sess, err := connectTestClient(srv)
+		Expect(err).NotTo(HaveOccurred())
+		return sess
+	}
 
 	Context("resources/list", func() {
 		It("returns the expected resource URIs", func() {
-			resps, err := callServer(tmpDir,
-				`{"jsonrpc":"2.0","id":3,"method":"resources/list"}`,
-			)
-			Expect(err).NotTo(HaveOccurred())
-			Expect(resps).To(HaveLen(1))
+			session = makeSession(tmpDir)
+			ctx := context.Background()
 
-			result := resps[0]["result"].(map[string]any)
-			resources := result["resources"].([]any)
+			result, err := session.ListResources(ctx, nil)
+			Expect(err).NotTo(HaveOccurred())
+
 			var uris []string
-			for _, r := range resources {
-				uris = append(uris, r.(map[string]any)["uri"].(string))
+			for _, r := range result.Resources {
+				uris = append(uris, r.URI)
 			}
 			Expect(uris).To(ContainElements(
 				"kubebuilder://version",
@@ -151,18 +121,16 @@ var _ = Describe("Server", func() {
 	})
 
 	Context("resources/read kubebuilder://version", func() {
-		It("returns version string", func() {
-			resps, err := callServer(tmpDir,
-				`{"jsonrpc":"2.0","id":4,"method":"resources/read","params":{"uri":"kubebuilder://version"}}`,
-			)
-			Expect(err).NotTo(HaveOccurred())
-			Expect(resps).To(HaveLen(1))
+		It("returns the version string", func() {
+			session = makeSession(tmpDir)
+			ctx := context.Background()
 
-			result := resps[0]["result"].(map[string]any)
-			contents := result["contents"].([]any)
-			Expect(contents).To(HaveLen(1))
-			text := contents[0].(map[string]any)["text"].(string)
-			Expect(text).To(ContainSubstring("v4.0.0-test"))
+			result, err := session.ReadResource(ctx, &sdkmcp.ReadResourceParams{
+				URI: "kubebuilder://version",
+			})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.Contents).To(HaveLen(1))
+			Expect(result.Contents[0].Text).To(ContainSubstring("v4.0.0-test"))
 		})
 	})
 
@@ -172,123 +140,104 @@ var _ = Describe("Server", func() {
 		})
 
 		It("returns project/config", func() {
-			resps, err := callServer(tmpDir,
-				`{"jsonrpc":"2.0","id":5,"method":"resources/read","params":{"uri":"kubebuilder://project/config"}}`,
-			)
+			session = makeSession(tmpDir)
+			ctx := context.Background()
+
+			result, err := session.ReadResource(ctx, &sdkmcp.ReadResourceParams{
+				URI: "kubebuilder://project/config",
+			})
 			Expect(err).NotTo(HaveOccurred())
-			result := resps[0]["result"].(map[string]any)
-			text := result["contents"].([]any)[0].(map[string]any)["text"].(string)
-			Expect(text).To(ContainSubstring("example.com"))
-			Expect(text).To(ContainSubstring("go.kubebuilder.io/v4"))
+			Expect(result.Contents[0].Text).To(ContainSubstring("example.com"))
+			Expect(result.Contents[0].Text).To(ContainSubstring("go.kubebuilder.io/v4"))
 		})
 
 		It("returns project/apis", func() {
-			resps, err := callServer(tmpDir,
-				`{"jsonrpc":"2.0","id":6,"method":"resources/read","params":{"uri":"kubebuilder://project/apis"}}`,
-			)
+			session = makeSession(tmpDir)
+			ctx := context.Background()
+
+			result, err := session.ReadResource(ctx, &sdkmcp.ReadResourceParams{
+				URI: "kubebuilder://project/apis",
+			})
 			Expect(err).NotTo(HaveOccurred())
-			result := resps[0]["result"].(map[string]any)
-			text := result["contents"].([]any)[0].(map[string]any)["text"].(string)
-			Expect(text).To(ContainSubstring("Widget"))
-			Expect(text).To(ContainSubstring("widgets"))
+			Expect(result.Contents[0].Text).To(ContainSubstring("Widget"))
+			Expect(result.Contents[0].Text).To(ContainSubstring("widgets"))
 		})
 
 		It("returns project/plugins", func() {
-			resps, err := callServer(tmpDir,
-				`{"jsonrpc":"2.0","id":7,"method":"resources/read","params":{"uri":"kubebuilder://project/plugins"}}`,
-			)
+			session = makeSession(tmpDir)
+			ctx := context.Background()
+
+			result, err := session.ReadResource(ctx, &sdkmcp.ReadResourceParams{
+				URI: "kubebuilder://project/plugins",
+			})
 			Expect(err).NotTo(HaveOccurred())
-			result := resps[0]["result"].(map[string]any)
-			text := result["contents"].([]any)[0].(map[string]any)["text"].(string)
-			Expect(text).To(ContainSubstring("go.kubebuilder.io/v4"))
+			Expect(result.Contents[0].Text).To(ContainSubstring("go.kubebuilder.io/v4"))
 		})
 	})
 
 	Context("resources/read error cases", func() {
-		It("returns error for unknown URI", func() {
-			resps, err := callServer(tmpDir,
-				`{"jsonrpc":"2.0","id":8,"method":"resources/read","params":{"uri":"kubebuilder://unknown"}}`,
-			)
-			Expect(err).NotTo(HaveOccurred())
-			Expect(resps[0]["error"]).NotTo(BeNil())
-		})
+		It("returns an error for project resources when no PROJECT file exists", func() {
+			session = makeSession(tmpDir)
+			ctx := context.Background()
 
-		It("returns error for project resources when no PROJECT file exists", func() {
-			resps, err := callServer(tmpDir,
-				`{"jsonrpc":"2.0","id":9,"method":"resources/read","params":{"uri":"kubebuilder://project/config"}}`,
-			)
-			Expect(err).NotTo(HaveOccurred())
-			errObj := resps[0]["error"].(map[string]any)
-			Expect(errObj["message"]).To(ContainSubstring("PROJECT"))
+			_, err := session.ReadResource(ctx, &sdkmcp.ReadResourceParams{
+				URI: "kubebuilder://project/config",
+			})
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("PROJECT"))
 		})
 	})
 
 	Context("prompts/list", func() {
-		It("returns expected prompt names", func() {
-			resps, err := callServer(tmpDir,
-				`{"jsonrpc":"2.0","id":10,"method":"prompts/list"}`,
-			)
+		It("returns the expected prompt names", func() {
+			session = makeSession(tmpDir)
+			ctx := context.Background()
+
+			result, err := session.ListPrompts(ctx, nil)
 			Expect(err).NotTo(HaveOccurred())
-			result := resps[0]["result"].(map[string]any)
-			ps := result["prompts"].([]any)
+
 			var names []string
-			for _, p := range ps {
-				names = append(names, p.(map[string]any)["name"].(string))
+			for _, p := range result.Prompts {
+				names = append(names, p.Name)
 			}
 			Expect(names).To(ContainElements("reconcile-best-practices", "project-summary"))
 		})
 	})
 
 	Context("prompts/get", func() {
-		It("returns reconcile-best-practices with version info", func() {
-			resps, err := callServer(tmpDir,
-				`{"jsonrpc":"2.0","id":11,"method":"prompts/get","params":{"name":"reconcile-best-practices"}}`,
-			)
+		It("returns reconcile-best-practices with version info and key content", func() {
+			session = makeSession(tmpDir)
+			ctx := context.Background()
+
+			result, err := session.GetPrompt(ctx, &sdkmcp.GetPromptParams{
+				Name: "reconcile-best-practices",
+			})
 			Expect(err).NotTo(HaveOccurred())
-			result := resps[0]["result"].(map[string]any)
-			msgs := result["messages"].([]any)
-			Expect(msgs).To(HaveLen(1))
-			text := msgs[0].(map[string]any)["content"].(map[string]any)["text"].(string)
+			Expect(result.Messages).To(HaveLen(1))
+			text := result.Messages[0].Content.(*sdkmcp.TextContent).Text
 			Expect(text).To(ContainSubstring("v4.0.0-test"))
 			Expect(text).To(ContainSubstring("Idempotency"))
 		})
 
 		It("returns project-summary", func() {
-			resps, err := callServer(tmpDir,
-				`{"jsonrpc":"2.0","id":12,"method":"prompts/get","params":{"name":"project-summary"}}`,
-			)
+			session = makeSession(tmpDir)
+			ctx := context.Background()
+
+			result, err := session.GetPrompt(ctx, &sdkmcp.GetPromptParams{
+				Name: "project-summary",
+			})
 			Expect(err).NotTo(HaveOccurred())
-			result := resps[0]["result"].(map[string]any)
-			Expect(result["messages"]).NotTo(BeEmpty())
+			Expect(result.Messages).NotTo(BeEmpty())
 		})
 
-		It("returns error for unknown prompt", func() {
-			resps, err := callServer(tmpDir,
-				`{"jsonrpc":"2.0","id":13,"method":"prompts/get","params":{"name":"nonexistent"}}`,
-			)
-			Expect(err).NotTo(HaveOccurred())
-			Expect(resps[0]["error"]).NotTo(BeNil())
-		})
-	})
+		It("returns an error for an unknown prompt", func() {
+			session = makeSession(tmpDir)
+			ctx := context.Background()
 
-	Context("unknown method", func() {
-		It("returns method-not-found error", func() {
-			resps, err := callServer(tmpDir,
-				`{"jsonrpc":"2.0","id":14,"method":"tools/call","params":{}}`,
-			)
-			Expect(err).NotTo(HaveOccurred())
-			errObj := resps[0]["error"].(map[string]any)
-			Expect(errObj["code"]).To(BeEquivalentTo(-32601))
-		})
-	})
-
-	Context("notifications (no id)", func() {
-		It("does not produce a response for initialized notification", func() {
-			resps, err := callServer(tmpDir,
-				`{"jsonrpc":"2.0","method":"initialized"}`,
-			)
-			Expect(err).NotTo(HaveOccurred())
-			Expect(resps).To(BeEmpty())
+			_, err := session.GetPrompt(ctx, &sdkmcp.GetPromptParams{
+				Name: "nonexistent",
+			})
+			Expect(err).To(HaveOccurred())
 		})
 	})
 })

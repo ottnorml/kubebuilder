@@ -15,69 +15,29 @@ limitations under the License.
 */
 
 // Package mcp implements a read-only Model Context Protocol (MCP) server for
-// the Kubebuilder CLI.  It exposes Kubebuilder project metadata and
+// the Kubebuilder CLI. It exposes Kubebuilder project metadata and
 // operator-development guidance over the MCP stdio transport so that AI
 // assistants can discover and use Kubebuilder context directly.
 package mcp
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log/slog"
-	"os"
-	"strings"
+
+	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"sigs.k8s.io/kubebuilder/v4/pkg/mcp/project"
 	"sigs.k8s.io/kubebuilder/v4/pkg/mcp/prompts"
 )
 
-// protocolVersion is the MCP protocol version advertised by this server.
-const protocolVersion = "2024-11-05"
-
-// rpcRequest is a minimal JSON-RPC 2.0 request.
-type rpcRequest struct {
-	JSONRPC string          `json:"jsonrpc"`
-	ID      json.RawMessage `json:"id,omitempty"`
-	Method  string          `json:"method"`
-	Params  json.RawMessage `json:"params,omitempty"`
-}
-
-// rpcResponse is a JSON-RPC 2.0 response.
-type rpcResponse struct {
-	JSONRPC string          `json:"jsonrpc"`
-	ID      json.RawMessage `json:"id,omitempty"`
-	Result  any             `json:"result,omitempty"`
-	Error   *rpcError       `json:"error,omitempty"`
-}
-
-// rpcError is a JSON-RPC 2.0 error object.
-type rpcError struct {
-	Code    int    `json:"code"`
-	Message string `json:"message"`
-}
-
-// Standard JSON-RPC 2.0 error codes.
-const (
-	codeParseError     = -32700
-	codeMethodNotFound = -32601
-	codeInvalidParams  = -32602
-	codeInternalError  = -32603
-)
-
-// Server is a read-only MCP server that exposes Kubebuilder resources and
-// prompts over the stdio transport.
+// Server holds the configuration for the Kubebuilder MCP server.
 type Server struct {
 	// version is the Kubebuilder version string surfaced in resources/prompts.
 	version string
 	// projectDir is the directory to load project context from.
 	projectDir string
-	// in is the stream to read JSON-RPC messages from (default: os.Stdin).
-	in io.Reader
-	// out is the stream to write JSON-RPC messages to (default: os.Stdout).
-	out io.Writer
 }
 
 // Option is a functional option for Server.
@@ -93,258 +53,80 @@ func WithProjectDir(dir string) Option {
 	return func(s *Server) { s.projectDir = dir }
 }
 
-// WithIO overrides the default stdin/stdout streams (useful for testing).
-func WithIO(in io.Reader, out io.Writer) Option {
-	return func(s *Server) {
-		s.in = in
-		s.out = out
-	}
-}
-
 // NewServer creates a new MCP Server with the provided options.
 func NewServer(opts ...Option) *Server {
-	s := &Server{
-		version: "(devel)",
-		in:      os.Stdin,
-		out:     os.Stdout,
-	}
+	s := &Server{version: "(devel)"}
 	for _, o := range opts {
 		o(s)
 	}
 	return s
 }
 
-// Run starts the MCP server and serves requests until ctx is cancelled or the
-// input stream is exhausted.
+// Run starts the MCP server over the stdio transport and blocks until ctx is
+// cancelled or the client disconnects.
 func (s *Server) Run(ctx context.Context) error {
-	slog.Info("kubebuilder MCP server starting", "transport", "stdio", "version", s.version)
-
-	scanner := bufio.NewScanner(s.in)
-	// Allow lines up to 4 MB (large projects may produce big JSON).
-	scanner.Buffer(make([]byte, 4*1024*1024), 4*1024*1024)
-
-	for {
-		select {
-		case <-ctx.Done():
-			return nil
-		default:
-		}
-
-		if !scanner.Scan() {
-			if err := scanner.Err(); err != nil {
-				return fmt.Errorf("reading stdin: %w", err)
-			}
-			// EOF — client closed the connection.
-			return nil
-		}
-
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" {
-			continue
-		}
-
-		var req rpcRequest
-		if err := json.Unmarshal([]byte(line), &req); err != nil {
-			s.writeError(nil, codeParseError, "parse error: "+err.Error())
-			continue
-		}
-
-		s.handle(req)
-	}
+	slog.Info("starting Kubebuilder MCP server", "transport", "stdio", "version", s.version)
+	return s.Build().Run(ctx, &sdkmcp.StdioTransport{})
 }
 
-// handle dispatches a single JSON-RPC request.
-func (s *Server) handle(req rpcRequest) {
-	// Notifications (no id) are silently acknowledged.
-	isNotification := req.ID == nil || string(req.ID) == "null"
-
-	switch req.Method {
-	case "initialize":
-		if isNotification {
-			return
-		}
-		s.writeResult(req.ID, s.handleInitialize())
-
-	case "initialized":
-		// Client notification – nothing to do.
-
-	case "ping":
-		if isNotification {
-			return
-		}
-		s.writeResult(req.ID, map[string]any{})
-
-	case "resources/list":
-		if isNotification {
-			return
-		}
-		s.writeResult(req.ID, s.handleResourcesList())
-
-	case "resources/read":
-		if isNotification {
-			return
-		}
-		result, err := s.handleResourcesRead(req.Params)
-		if err != nil {
-			s.writeError(req.ID, codeInvalidParams, err.Error())
-			return
-		}
-		s.writeResult(req.ID, result)
-
-	case "prompts/list":
-		if isNotification {
-			return
-		}
-		s.writeResult(req.ID, s.handlePromptsList())
-
-	case "prompts/get":
-		if isNotification {
-			return
-		}
-		result, err := s.handlePromptsGet(req.Params)
-		if err != nil {
-			s.writeError(req.ID, codeInvalidParams, err.Error())
-			return
-		}
-		s.writeResult(req.ID, result)
-
-	default:
-		if !isNotification {
-			s.writeError(req.ID, codeMethodNotFound, fmt.Sprintf("method not found: %q", req.Method))
-		}
-	}
-}
-
-// --- initialize ---
-
-type initializeResult struct {
-	ProtocolVersion string             `json:"protocolVersion"`
-	Capabilities    serverCapabilities `json:"capabilities"`
-	ServerInfo      serverInfo         `json:"serverInfo"`
-}
-
-type serverCapabilities struct {
-	Resources resourceCapability `json:"resources"`
-	Prompts   promptCapability   `json:"prompts"`
-}
-
-type resourceCapability struct{}
-type promptCapability struct{}
-
-type serverInfo struct {
-	Name    string `json:"name"`
-	Version string `json:"version"`
-}
-
-func (s *Server) handleInitialize() initializeResult {
-	return initializeResult{
-		ProtocolVersion: protocolVersion,
-		Capabilities: serverCapabilities{
-			Resources: resourceCapability{},
-			Prompts:   promptCapability{},
-		},
-		ServerInfo: serverInfo{
-			Name:    "kubebuilder",
-			Version: s.version,
-		},
-	}
+// Build constructs and returns the underlying SDK server with all resources and
+// prompts registered. It is used by Run and also exposed for testing via an
+// in-memory transport.
+func (s *Server) Build() *sdkmcp.Server {
+	srv := sdkmcp.NewServer(&sdkmcp.Implementation{
+		Name:    "kubebuilder",
+		Version: s.version,
+	}, nil)
+	s.registerResources(srv)
+	s.registerPrompts(srv)
+	return srv
 }
 
 // --- resources ---
 
-type resourceDescriptor struct {
-	URI         string `json:"uri"`
-	Name        string `json:"name"`
-	Description string `json:"description"`
-	MIMEType    string `json:"mimeType"`
+func (s *Server) registerResources(srv *sdkmcp.Server) {
+	srv.AddResource(&sdkmcp.Resource{
+		URI:         "kubebuilder://version",
+		Name:        "Kubebuilder Version",
+		Description: "Current Kubebuilder build information",
+		MIMEType:    "application/json",
+	}, s.handleVersion)
+
+	srv.AddResource(&sdkmcp.Resource{
+		URI:         "kubebuilder://project/config",
+		Name:        "Project Configuration",
+		Description: "Contents of the PROJECT file summarized as JSON",
+		MIMEType:    "application/json",
+	}, s.handleProjectConfig)
+
+	srv.AddResource(&sdkmcp.Resource{
+		URI:         "kubebuilder://project/apis",
+		Name:        "Project APIs",
+		Description: "List of API resources defined in the project",
+		MIMEType:    "application/json",
+	}, s.handleProjectAPIs)
+
+	srv.AddResource(&sdkmcp.Resource{
+		URI:         "kubebuilder://project/plugins",
+		Name:        "Project Plugins",
+		Description: "Active plugin chain configured in the project",
+		MIMEType:    "application/json",
+	}, s.handleProjectPlugins)
 }
 
-type resourcesListResult struct {
-	Resources []resourceDescriptor `json:"resources"`
-}
-
-func (s *Server) handleResourcesList() resourcesListResult {
-	return resourcesListResult{
-		Resources: []resourceDescriptor{
-			{
-				URI:         "kubebuilder://version",
-				Name:        "Kubebuilder Version",
-				Description: "Current Kubebuilder build information",
-				MIMEType:    "application/json",
-			},
-			{
-				URI:         "kubebuilder://project/config",
-				Name:        "Project Configuration",
-				Description: "Contents of the PROJECT file summarized as JSON",
-				MIMEType:    "application/json",
-			},
-			{
-				URI:         "kubebuilder://project/apis",
-				Name:        "Project APIs",
-				Description: "List of API resources defined in the project",
-				MIMEType:    "application/json",
-			},
-			{
-				URI:         "kubebuilder://project/plugins",
-				Name:        "Project Plugins",
-				Description: "Active plugin chain configured in the project",
-				MIMEType:    "application/json",
-			},
-		},
-	}
-}
-
-type resourceContent struct {
-	URI      string `json:"uri"`
-	MIMEType string `json:"mimeType"`
-	Text     string `json:"text"`
-}
-
-type resourceReadResult struct {
-	Contents []resourceContent `json:"contents"`
-}
-
-type resourceReadParams struct {
-	URI string `json:"uri"`
-}
-
-func (s *Server) handleResourcesRead(raw json.RawMessage) (resourceReadResult, error) {
-	var params resourceReadParams
-	if err := json.Unmarshal(raw, &params); err != nil {
-		return resourceReadResult{}, fmt.Errorf("invalid params: %w", err)
-	}
-
-	switch params.URI {
-	case "kubebuilder://version":
-		return s.resourceVersion()
-	case "kubebuilder://project/config":
-		return s.resourceProjectConfig()
-	case "kubebuilder://project/apis":
-		return s.resourceProjectAPIs()
-	case "kubebuilder://project/plugins":
-		return s.resourceProjectPlugins()
-	default:
-		return resourceReadResult{}, fmt.Errorf("unknown resource URI: %q", params.URI)
-	}
-}
-
-func (s *Server) resourceVersion() (resourceReadResult, error) {
-	payload := map[string]string{"version": s.version}
-	text, err := marshalJSON(payload)
+func (s *Server) handleVersion(_ context.Context, _ *sdkmcp.ReadResourceRequest) (*sdkmcp.ReadResourceResult, error) {
+	text, err := marshalJSON(map[string]string{"version": s.version})
 	if err != nil {
-		return resourceReadResult{}, err
+		return nil, err
 	}
-	return resourceReadResult{Contents: []resourceContent{{
-		URI: "kubebuilder://version", MIMEType: "application/json", Text: text,
-	}}}, nil
+	return resourceResult("kubebuilder://version", text), nil
 }
 
-func (s *Server) resourceProjectConfig() (resourceReadResult, error) {
+func (s *Server) handleProjectConfig(_ context.Context, _ *sdkmcp.ReadResourceRequest) (*sdkmcp.ReadResourceResult, error) {
 	ctx, err := project.LoadContext(s.projectDir)
 	if err != nil {
-		return resourceReadResult{}, err
+		return nil, err
 	}
-
 	payload := map[string]any{
 		"version":     ctx.ProjectVersion,
 		"domain":      ctx.Domain,
@@ -356,162 +138,94 @@ func (s *Server) resourceProjectConfig() (resourceReadResult, error) {
 	}
 	text, err := marshalJSON(payload)
 	if err != nil {
-		return resourceReadResult{}, err
+		return nil, err
 	}
-	return resourceReadResult{Contents: []resourceContent{{
-		URI: "kubebuilder://project/config", MIMEType: "application/json", Text: text,
-	}}}, nil
+	return resourceResult("kubebuilder://project/config", text), nil
 }
 
-func (s *Server) resourceProjectAPIs() (resourceReadResult, error) {
+func (s *Server) handleProjectAPIs(_ context.Context, _ *sdkmcp.ReadResourceRequest) (*sdkmcp.ReadResourceResult, error) {
 	ctx, err := project.LoadContext(s.projectDir)
 	if err != nil {
-		return resourceReadResult{}, err
+		return nil, err
 	}
-
 	text, err := marshalJSON(ctx.APIs)
 	if err != nil {
-		return resourceReadResult{}, err
+		return nil, err
 	}
-	return resourceReadResult{Contents: []resourceContent{{
-		URI: "kubebuilder://project/apis", MIMEType: "application/json", Text: text,
-	}}}, nil
+	return resourceResult("kubebuilder://project/apis", text), nil
 }
 
-func (s *Server) resourceProjectPlugins() (resourceReadResult, error) {
+func (s *Server) handleProjectPlugins(_ context.Context, _ *sdkmcp.ReadResourceRequest) (*sdkmcp.ReadResourceResult, error) {
 	ctx, err := project.LoadContext(s.projectDir)
 	if err != nil {
-		return resourceReadResult{}, err
+		return nil, err
 	}
-
-	payload := map[string]any{
-		"configured": ctx.PluginChain,
-	}
-	text, err := marshalJSON(payload)
+	text, err := marshalJSON(map[string]any{"configured": ctx.PluginChain})
 	if err != nil {
-		return resourceReadResult{}, err
+		return nil, err
 	}
-	return resourceReadResult{Contents: []resourceContent{{
-		URI: "kubebuilder://project/plugins", MIMEType: "application/json", Text: text,
-	}}}, nil
+	return resourceResult("kubebuilder://project/plugins", text), nil
+}
+
+// resourceResult is a convenience constructor for a single-entry ReadResourceResult.
+func resourceResult(uri, text string) *sdkmcp.ReadResourceResult {
+	return &sdkmcp.ReadResourceResult{
+		Contents: []*sdkmcp.ResourceContents{{
+			URI:      uri,
+			MIMEType: "application/json",
+			Text:     text,
+		}},
+	}
 }
 
 // --- prompts ---
 
-type promptDescriptor struct {
-	Name        string `json:"name"`
-	Description string `json:"description"`
+func (s *Server) registerPrompts(srv *sdkmcp.Server) {
+	srv.AddPrompt(&sdkmcp.Prompt{
+		Name:        "reconcile-best-practices",
+		Description: "Best practices for implementing a Kubernetes controller Reconcile function",
+	}, s.handleReconcileBestPractices)
+
+	srv.AddPrompt(&sdkmcp.Prompt{
+		Name:        "project-summary",
+		Description: "Summary of the current Kubebuilder project",
+	}, s.handleProjectSummary)
 }
 
-type promptsListResult struct {
-	Prompts []promptDescriptor `json:"prompts"`
-}
-
-func (s *Server) handlePromptsList() promptsListResult {
-	return promptsListResult{
-		Prompts: []promptDescriptor{
-			{
-				Name:        "reconcile-best-practices",
-				Description: "Best practices for implementing a Kubernetes controller Reconcile function",
-			},
-			{
-				Name:        "project-summary",
-				Description: "Summary of the current Kubebuilder project",
-			},
-		},
-	}
-}
-
-type promptMessage struct {
-	Role    string        `json:"role"`
-	Content promptContent `json:"content"`
-}
-
-type promptContent struct {
-	Type string `json:"type"`
-	Text string `json:"text"`
-}
-
-type promptGetResult struct {
-	Description string          `json:"description"`
-	Messages    []promptMessage `json:"messages"`
-}
-
-type promptGetParams struct {
-	Name string `json:"name"`
-}
-
-func (s *Server) handlePromptsGet(raw json.RawMessage) (promptGetResult, error) {
-	var params promptGetParams
-	if err := json.Unmarshal(raw, &params); err != nil {
-		return promptGetResult{}, fmt.Errorf("invalid params: %w", err)
-	}
-
-	switch params.Name {
-	case "reconcile-best-practices":
-		text, err := prompts.RenderReconcileBestPractices(s.version)
-		if err != nil {
-			return promptGetResult{}, fmt.Errorf("rendering prompt: %w", err)
-		}
-		return promptGetResult{
-			Description: "Best practices for implementing a Kubernetes controller Reconcile function",
-			Messages: []promptMessage{
-				{Role: "user", Content: promptContent{Type: "text", Text: text}},
-			},
-		}, nil
-
-	case "project-summary":
-		ctx, _ := project.LoadContext(s.projectDir) // nil ctx is acceptable
-		text, err := prompts.RenderProjectSummary(s.version, ctx)
-		if err != nil {
-			return promptGetResult{}, fmt.Errorf("rendering prompt: %w", err)
-		}
-		return promptGetResult{
-			Description: "Summary of the current Kubebuilder project",
-			Messages: []promptMessage{
-				{Role: "user", Content: promptContent{Type: "text", Text: text}},
-			},
-		}, nil
-
-	default:
-		return promptGetResult{}, fmt.Errorf("unknown prompt: %q", params.Name)
-	}
-}
-
-// --- transport helpers ---
-
-func (s *Server) writeResult(id json.RawMessage, result any) {
-	s.write(rpcResponse{
-		JSONRPC: "2.0",
-		ID:      id,
-		Result:  result,
-	})
-}
-
-func (s *Server) writeError(id json.RawMessage, code int, message string) {
-	s.write(rpcResponse{
-		JSONRPC: "2.0",
-		ID:      id,
-		Error:   &rpcError{Code: code, Message: message},
-	})
-}
-
-func (s *Server) write(resp rpcResponse) {
-	b, err := json.Marshal(resp)
+func (s *Server) handleReconcileBestPractices(_ context.Context, _ *sdkmcp.GetPromptRequest) (*sdkmcp.GetPromptResult, error) {
+	text, err := prompts.RenderReconcileBestPractices(s.version)
 	if err != nil {
-		slog.Error("failed to marshal JSON-RPC response", "error", err)
-		return
+		return nil, fmt.Errorf("rendering prompt: %w", err)
 	}
-	if _, err := fmt.Fprintln(s.out, string(b)); err != nil {
-		slog.Error("failed to write JSON-RPC response", "error", err)
-	}
+	return &sdkmcp.GetPromptResult{
+		Description: "Best practices for implementing a Kubernetes controller Reconcile function",
+		Messages: []*sdkmcp.PromptMessage{
+			{Role: "user", Content: &sdkmcp.TextContent{Text: text}},
+		},
+	}, nil
 }
 
-// marshalJSON is a thin wrapper that returns a JSON string.
+func (s *Server) handleProjectSummary(_ context.Context, _ *sdkmcp.GetPromptRequest) (*sdkmcp.GetPromptResult, error) {
+	ctx, _ := project.LoadContext(s.projectDir) // nil ctx is acceptable; prompt renders without project
+	text, err := prompts.RenderProjectSummary(s.version, ctx)
+	if err != nil {
+		return nil, fmt.Errorf("rendering prompt: %w", err)
+	}
+	return &sdkmcp.GetPromptResult{
+		Description: "Summary of the current Kubebuilder project",
+		Messages: []*sdkmcp.PromptMessage{
+			{Role: "user", Content: &sdkmcp.TextContent{Text: text}},
+		},
+	}, nil
+}
+
+// --- helpers ---
+
+// marshalJSON serialises v to a compact JSON string.
 func marshalJSON(v any) (string, error) {
 	b, err := json.Marshal(v)
 	if err != nil {
-		return "", fmt.Errorf("marshalling resource payload: %w", err)
+		return "", fmt.Errorf("marshaling resource payload: %w", err)
 	}
 	return string(b), nil
 }
