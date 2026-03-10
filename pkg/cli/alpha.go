@@ -31,6 +31,7 @@ const (
 
 var alphaCommands = []*cobra.Command{
 	newAlphaCommand(),
+	alpha.NewMCPCommand(),
 	alpha.NewScaffoldCommand(),
 	alpha.NewUpdateCommand(),
 }

@@ -1,0 +1,91 @@
+# Reconcile Best Practices for Kubebuilder ({{.Version}})
+
+Use these guidelines when implementing the `Reconcile` function of a Kubernetes controller.
+
+## Idempotency
+
+Every `Reconcile` call must be safe to run multiple times.
+Do not assume the function is called only once per change.
+Write state by applying desired state, not by diffing.
+
+## Fetch and return early on not-found
+
+```go
+var obj myv1.MyKind
+if err := r.Get(ctx, req.NamespacedName, &obj); err != nil {
+    return ctrl.Result{}, client.IgnoreNotFound(err)
+}
+```
+
+Always ignore `NotFound` errors from `Get` — the object may have been deleted
+before the reconcile ran.
+
+## Status conditions
+
+Use `metav1.Condition` and `apimeta.SetStatusCondition` to record meaningful
+status on your resource. Prefer standard condition types (`Ready`, `Degraded`,
+`Progressing`) before inventing custom ones.
+
+Always update `.Status` with a patch (not a full `Update`) to avoid conflicts:
+
+```go
+patch := client.MergeFrom(obj.DeepCopy())
+// ... modify obj.Status ...
+if err := r.Status().Patch(ctx, &obj, patch); err != nil {
+    return ctrl.Result{}, err
+}
+```
+
+## Finalizers
+
+Add a finalizer in the reconcile loop when the resource needs cleanup:
+
+```go
+if obj.DeletionTimestamp.IsZero() {
+    if !controllerutil.ContainsFinalizer(&obj, myFinalizer) {
+        controllerutil.AddFinalizer(&obj, myFinalizer)
+        return ctrl.Result{}, r.Update(ctx, &obj)
+    }
+} else {
+    if controllerutil.ContainsFinalizer(&obj, myFinalizer) {
+        if err := r.cleanup(ctx, &obj); err != nil {
+            return ctrl.Result{}, err
+        }
+        controllerutil.RemoveFinalizer(&obj, myFinalizer)
+        return ctrl.Result{}, r.Update(ctx, &obj)
+    }
+}
+```
+
+## Requeue and backoff
+
+- Return `ctrl.Result{}` (no requeue) on success.
+- Return `ctrl.Result{}, err` to requeue with exponential back-off.
+- Return `ctrl.Result{RequeueAfter: d}` to poll at a fixed interval.
+- Avoid `Requeue: true` (immediately requeues with no back-off).
+
+## Avoid tight status-update loops
+
+Do not call `r.Status().Update` or `r.Status().Patch` inside a tight loop.
+Each call triggers a new watch event and can cause a reconcile storm.
+
+## Watch ownership
+
+Use `ctrl.SetupWithManager(mgr).Owns(&owned{})` to automatically requeue the
+owner when an owned object changes. Use `Watches` with a custom handler for
+cross-resource dependencies.
+
+## Logging
+
+Use structured logging with `log.FromContext(ctx)`.
+Always add the object namespace and name:
+
+```go
+log := log.FromContext(ctx)
+log.Info("Reconciling", "generation", obj.Generation)
+```
+
+## References
+
+- controller-runtime docs: https://pkg.go.dev/sigs.k8s.io/controller-runtime
+- Kubebuilder book: https://book.kubebuilder.io
