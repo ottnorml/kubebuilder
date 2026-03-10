@@ -275,7 +275,7 @@ func (s *Server) handleResourcesList() resourcesListResult {
 			{
 				URI:         "kubebuilder://project/config",
 				Name:        "Project Configuration",
-				Description: "Contents of the PROJECT file summarised as JSON",
+				Description: "Contents of the PROJECT file summarized as JSON",
 				MIMEType:    "application/json",
 			},
 			{

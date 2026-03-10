@@ -34,7 +34,7 @@ import (
 	_ "sigs.k8s.io/kubebuilder/v4/pkg/config/v3"
 )
 
-// APIInfo summarises a single API/GVK registered in the project.
+// APIInfo summarizes a single API/GVK registered in the project.
 type APIInfo struct {
 	Group      string       `json:"group"`
 	Version    string       `json:"version"`
@@ -85,7 +85,7 @@ func (e ErrNotProject) Error() string {
 	return fmt.Sprintf("no Kubebuilder PROJECT file found in %q; run this command from a Kubebuilder project root", e.Dir)
 }
 
-// LoadContext loads and summarises the Kubebuilder project rooted at dir.
+// LoadContext loads and summarizes the Kubebuilder project rooted at dir.
 // It returns ErrNotProject when the directory does not contain a PROJECT file.
 func LoadContext(dir string) (*Context, error) {
 	if dir == "" {
@@ -133,15 +133,15 @@ func buildContext(rootDir string, cfg config.Config) *Context {
 	resources, err := cfg.GetResources()
 	if err == nil {
 		for _, r := range resources {
-			ctx.APIs = append(ctx.APIs, summariseResource(r))
+			ctx.APIs = append(ctx.APIs, summarizeResource(r))
 		}
 	}
 
 	return ctx
 }
 
-// summariseResource converts a resource.Resource to a minimal APIInfo.
-func summariseResource(r resource.Resource) APIInfo {
+// summarizeResource converts a resource.Resource to a minimal APIInfo.
+func summarizeResource(r resource.Resource) APIInfo {
 	info := APIInfo{
 		Group:      r.Group,
 		Version:    r.Version,
