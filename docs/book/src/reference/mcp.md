@@ -1,13 +1,13 @@
-# kubebuilder mcp
+# kubebuilder alpha mcp
 
-> **Experimental**: This command is read-only by default. The protocol, resource URIs, and prompt names may change in future releases.
+> **Alpha / Experimental**: This command is read-only by default. The protocol, resource URIs, and prompt names may change in future releases without notice.
 
-`kubebuilder mcp` starts a [Model Context Protocol (MCP)][mcp-spec] server over stdio, allowing AI coding assistants (such as Claude, Cursor, or GitHub Copilot) to discover Kubebuilder project metadata and operator-development guidance directly from the binary.
+`kubebuilder alpha mcp` starts a [Model Context Protocol (MCP)][mcp-spec] server over stdio, allowing AI coding assistants (such as Claude, Cursor, or GitHub Copilot) to discover Kubebuilder project metadata and operator-development guidance directly from the binary.
 
 ## Usage
 
 ```bash
-kubebuilder mcp [flags]
+kubebuilder alpha mcp [flags]
 ```
 
 ### Flags
@@ -84,14 +84,14 @@ Prompts are version-aware: they embed the running Kubebuilder version and, where
 
 ## Connecting an AI assistant
 
-Configure your AI client to run `kubebuilder mcp` as an MCP server. For example, with Claude Desktop, add the following to `claude_desktop_config.json`:
+Configure your AI client to run `kubebuilder alpha mcp` as an MCP server. For example, with Claude Desktop, add the following to `claude_desktop_config.json`:
 
 ```json
 {
   "mcpServers": {
     "kubebuilder": {
       "command": "kubebuilder",
-      "args": ["mcp"]
+      "args": ["alpha", "mcp"]
     }
   }
 }
@@ -104,7 +104,7 @@ For projects not in the current working directory, use `--project-dir`:
   "mcpServers": {
     "kubebuilder": {
       "command": "kubebuilder",
-      "args": ["mcp", "--project-dir", "/path/to/my-operator"]
+      "args": ["alpha", "mcp", "--project-dir", "/path/to/my-operator"]
     }
   }
 }
@@ -115,7 +115,7 @@ For projects not in the current working directory, use `--project-dir`:
 - **Read-only by default.** No files are created or modified.
 - **No shell execution.** The server calls Go functions directly; it never passes arbitrary strings to a shell.
 - **stdio only.** No network listener is opened.
-- **Experimental.** Resource URIs, prompt names, and payload shapes are subject to change between minor releases.
+- **Alpha subcommand.** Alpha subcommands are exploratory and may be removed without warning. No backwards compatibility is guaranteed.
 
 [mcp-spec]: https://spec.modelcontextprotocol.io/
 [jsonrpc]: https://www.jsonrpc.org/specification

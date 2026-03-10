@@ -1,5 +1,5 @@
 /*
-Copyright 2025 The Kubernetes Authors.
+Copyright 2026 The Kubernetes Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package cli
+package alpha
 
 import (
 	"context"
@@ -25,10 +25,14 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"sigs.k8s.io/kubebuilder/v4/internal/cli/version"
 	"sigs.k8s.io/kubebuilder/v4/pkg/mcp"
 )
 
-func (c CLI) newMCPCmd() *cobra.Command {
+// NewMCPCommand returns the `kubebuilder alpha mcp` command, which starts a
+// read-only Model Context Protocol (MCP) server over stdio so that AI
+// assistants can discover Kubebuilder resources and prompts.
+func NewMCPCommand() *cobra.Command {
 	var (
 		transport  string
 		projectDir string
@@ -36,7 +40,7 @@ func (c CLI) newMCPCmd() *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "mcp",
-		Short: "Run an MCP server for AI-assisted operator development",
+		Short: "Run an MCP server for AI-assisted operator development (alpha)",
 		Long: `Run a read-only Model Context Protocol (MCP) server over stdio.
 
 The server exposes Kubebuilder project metadata and operator-development
@@ -58,19 +62,20 @@ Available prompts:
 
 Run from the root of a Kubebuilder project to enable project-scoped resources.
 `,
-		Example: fmt.Sprintf(`  # Start the MCP server (stdio transport)
-  %[1]s mcp
+		Example: `  # Start the MCP server (stdio transport)
+  kubebuilder alpha mcp
 
   # Start the MCP server from a specific project directory
-  %[1]s mcp --project-dir /path/to/my-operator
-`, c.commandName),
-		RunE: func(cmd *cobra.Command, _ []string) error {
+  kubebuilder alpha mcp --project-dir /path/to/my-operator
+`,
+		RunE: func(_ *cobra.Command, _ []string) error {
 			if transport != "stdio" {
 				return fmt.Errorf("unsupported transport %q: only \"stdio\" is supported", transport)
 			}
 
+			v := version.New()
 			srv := mcp.NewServer(
-				mcp.WithVersion(c.cliVersion),
+				mcp.WithVersion(v.GetKubeBuilderVersion()),
 				mcp.WithProjectDir(projectDir),
 			)
 
@@ -82,9 +87,9 @@ Run from the root of a Kubebuilder project to enable project-scoped resources.
 	}
 
 	cmd.Flags().StringVar(&transport, "transport", "stdio",
-		"Transport to use for the MCP server (only \"stdio\" is supported)")
+		"transport to use for the MCP server (only \"stdio\" is supported)")
 	cmd.Flags().StringVar(&projectDir, "project-dir", "",
-		"Directory containing the Kubebuilder PROJECT file (defaults to the current directory)")
+		"directory containing the Kubebuilder PROJECT file (defaults to the current directory)")
 
 	return cmd
 }

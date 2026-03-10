@@ -560,9 +560,6 @@ func (c *CLI) addSubcommands() {
 	// kubebuilder init
 	c.cmd.AddCommand(c.newInitCmd())
 
-	// kubebuilder mcp
-	c.cmd.AddCommand(c.newMCPCmd())
-
 	// kubebuilder version
 	// Only add version if a version string was provided
 	if c.version != "" {

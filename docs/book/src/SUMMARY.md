@@ -58,9 +58,8 @@
 - [Alpha Commands](./reference/alpha_commands.md)
 
   - [alpha generate](./reference/commands/alpha_generate.md)
+  - [alpha mcp](./reference/mcp.md)
   - [alpha update](./reference/commands/alpha_update.md)
-
-- [MCP Server](./reference/mcp.md)
 
 ---
 
